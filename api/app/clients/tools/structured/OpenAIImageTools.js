@@ -30,6 +30,10 @@ function replaceUnwantedChars(inputString) {
     .trim();
 }
 
+/** Sent to the model when a successful response carries no image, e.g. a prompt the provider declined. */
+const noImageMessage =
+  'The image provider returned no image for this prompt. The provider may have declined the prompt. Do not call the tool again with the same prompt; ask the user to rephrase it.';
+
 function returnValue(value) {
   if (typeof value === 'string') {
     return [value, {}];
@@ -161,24 +165,36 @@ function createOpenAIImageTools(fields = {}) {
           derivedSignal.addEventListener('abort', abortHandler, { once: true });
         }
 
-        resp = await openai.images.generate(
-          {
-            model: imageModel,
-            prompt: replaceUnwantedChars(prompt),
-            n: Math.min(Math.max(1, n), 10),
-            background,
-            output_format,
-            output_compression:
-              output_format === EImageOutputType.WEBP || output_format === EImageOutputType.JPEG
-                ? output_compression
-                : undefined,
-            quality,
-            size,
-          },
-          {
-            signal: derivedSignal,
-          },
-        );
+        const generate = () =>
+          openai.images.generate(
+            {
+              model: imageModel,
+              prompt: replaceUnwantedChars(prompt),
+              n: Math.min(Math.max(1, n), 10),
+              background,
+              output_format,
+              output_compression:
+                output_format === EImageOutputType.WEBP || output_format === EImageOutputType.JPEG
+                  ? output_compression
+                  : undefined,
+              quality,
+              size,
+            },
+            {
+              signal: derivedSignal,
+            },
+          );
+
+        resp = await generate();
+        /** Some OpenAI-compatible providers answer a declined prompt with HTTP 200 and an empty
+         * `data` array. The same prompt often passes on a second attempt. */
+        if (resp && !resp.data?.length) {
+          logger.warn('[image_gen_oai] Response has no image data, retrying once', {
+            request_id: resp._request_id,
+            prompt_length: prompt.length,
+          });
+          resp = await generate();
+        }
       } catch (error) {
         const message = '[image_gen_oai] Problem generating the image:';
         logAxiosError({ error, message });
@@ -198,6 +214,14 @@ Error Message: ${error.message}`);
 
       // For gpt-image-1, the response contains base64-encoded images
       // TODO: handle cost in `resp.usage`
+      if (!resp.data?.length) {
+        logger.warn('[image_gen_oai] Response has no image data after one retry', {
+          request_id: resp._request_id,
+          prompt_length: prompt.length,
+        });
+        return returnValue(noImageMessage);
+      }
+
       const base64Image = resp.data[0].b64_json;
 
       if (!base64Image) {
@@ -364,9 +388,11 @@ Error Message: ${error.message}`);
         const response = await axios.post('/images/edits', formData, axiosConfig);
 
         if (!response.data || !response.data.data || !response.data.data.length) {
-          return returnValue(
-            'No image data returned from OpenAI API. There may be a problem with the API or your configuration.',
-          );
+          logger.warn('[image_edit_oai] Response has no image data', {
+            request_id: response.headers?.['x-request-id'],
+            prompt_length: prompt.length,
+          });
+          return returnValue(noImageMessage);
         }
 
         const base64Image = response.data.data[0].b64_json;

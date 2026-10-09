@@ -162,3 +162,72 @@ describe('OpenAIImageTools - IMAGE_GEN_OAI_MODEL environment variable', () => {
     );
   });
 });
+
+describe('OpenAIImageTools - successful response with no image data', () => {
+  let originalEnv;
+
+  const image = { data: [{ b64_json: 'base64-encoded-image-data' }] };
+  const empty = { data: [], _request_id: 'req-123' };
+
+  const createGenTool = (mockGenerate) => {
+    OpenAI.mockImplementation(() => ({
+      images: {
+        generate: mockGenerate,
+      },
+    }));
+    const [imageGenTool] = createOpenAIImageTools({
+      isAgent: true,
+      override: false,
+      req: { user: { id: 'test-user' } },
+    });
+    return imageGenTool;
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    originalEnv = { ...process.env };
+    process.env.IMAGE_GEN_OAI_API_KEY = 'test-api-key';
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('should retry once and return the image when the first response is empty', async () => {
+    const mockGenerate = jest.fn().mockResolvedValueOnce(empty).mockResolvedValueOnce(image);
+
+    const [content, artifact] = await createGenTool(mockGenerate).func({ prompt: 'test prompt' });
+
+    expect(mockGenerate).toHaveBeenCalledTimes(2);
+    expect(mockGenerate.mock.calls[1][0]).toEqual(mockGenerate.mock.calls[0][0]);
+    expect(artifact.content[0].image_url.url).toContain('base64-encoded-image-data');
+    expect(content[0].text).toContain('generated_image_id');
+  });
+
+  it('should return a clear message instead of throwing when both responses are empty', async () => {
+    const mockGenerate = jest.fn().mockResolvedValue(empty);
+
+    const [content, artifact] = await createGenTool(mockGenerate).func({ prompt: 'test prompt' });
+
+    expect(mockGenerate).toHaveBeenCalledTimes(2);
+    expect(content).toContain('returned no image');
+    expect(artifact).toEqual({});
+  });
+
+  it('should treat a response without a data array as empty', async () => {
+    const mockGenerate = jest.fn().mockResolvedValue({});
+
+    const [content] = await createGenTool(mockGenerate).func({ prompt: 'test prompt' });
+
+    expect(mockGenerate).toHaveBeenCalledTimes(2);
+    expect(content).toContain('returned no image');
+  });
+
+  it('should not retry when the first response has an image', async () => {
+    const mockGenerate = jest.fn().mockResolvedValue(image);
+
+    await createGenTool(mockGenerate).func({ prompt: 'test prompt' });
+
+    expect(mockGenerate).toHaveBeenCalledTimes(1);
+  });
+});
