@@ -37,6 +37,13 @@ jest.mock('~/models', () => ({
   getFiles: jest.fn().mockResolvedValue([]),
 }));
 
+/** Mirrors the SDK's `APIPromise`: the tool reads the body and the headers with `withResponse()`. */
+const apiResponse = (data, headers = {}) => ({
+  withResponse: () => Promise.resolve({ data, response: { headers: new Headers(headers) } }),
+});
+
+const imageResponse = () => apiResponse({ data: [{ b64_json: 'base64-encoded-image-data' }] });
+
 describe('OpenAIImageTools - IMAGE_GEN_OAI_MODEL environment variable', () => {
   let originalEnv;
 
@@ -48,13 +55,7 @@ describe('OpenAIImageTools - IMAGE_GEN_OAI_MODEL environment variable', () => {
 
     OpenAI.mockImplementation(() => ({
       images: {
-        generate: jest.fn().mockResolvedValue({
-          data: [
-            {
-              b64_json: 'base64-encoded-image-data',
-            },
-          ],
-        }),
+        generate: jest.fn().mockImplementation(imageResponse),
       },
     }));
   });
@@ -72,13 +73,7 @@ describe('OpenAIImageTools - IMAGE_GEN_OAI_MODEL environment variable', () => {
       req: { user: { id: 'test-user' } },
     });
 
-    const mockGenerate = jest.fn().mockResolvedValue({
-      data: [
-        {
-          b64_json: 'base64-encoded-image-data',
-        },
-      ],
-    });
+    const mockGenerate = jest.fn().mockImplementation(imageResponse);
 
     OpenAI.mockImplementation(() => ({
       images: {
@@ -99,13 +94,7 @@ describe('OpenAIImageTools - IMAGE_GEN_OAI_MODEL environment variable', () => {
   it('should use "gpt-image-1.5" when IMAGE_GEN_OAI_MODEL is set to "gpt-image-1.5"', async () => {
     process.env.IMAGE_GEN_OAI_MODEL = 'gpt-image-1.5';
 
-    const mockGenerate = jest.fn().mockResolvedValue({
-      data: [
-        {
-          b64_json: 'base64-encoded-image-data',
-        },
-      ],
-    });
+    const mockGenerate = jest.fn().mockImplementation(imageResponse);
 
     OpenAI.mockImplementation(() => ({
       images: {
@@ -132,13 +121,7 @@ describe('OpenAIImageTools - IMAGE_GEN_OAI_MODEL environment variable', () => {
   it('should use custom model name from IMAGE_GEN_OAI_MODEL environment variable', async () => {
     process.env.IMAGE_GEN_OAI_MODEL = 'custom-image-model';
 
-    const mockGenerate = jest.fn().mockResolvedValue({
-      data: [
-        {
-          b64_json: 'base64-encoded-image-data',
-        },
-      ],
-    });
+    const mockGenerate = jest.fn().mockImplementation(imageResponse);
 
     OpenAI.mockImplementation(() => ({
       images: {
@@ -166,8 +149,7 @@ describe('OpenAIImageTools - IMAGE_GEN_OAI_MODEL environment variable', () => {
 describe('OpenAIImageTools - successful response with no image data', () => {
   let originalEnv;
 
-  const image = { data: [{ b64_json: 'base64-encoded-image-data' }] };
-  const empty = { data: [], _request_id: 'req-123' };
+  const empty = () => apiResponse({ data: [] }, { 'x-litellm-call-id': 'call-123' });
 
   const createGenTool = (mockGenerate) => {
     OpenAI.mockImplementation(() => ({
@@ -194,7 +176,10 @@ describe('OpenAIImageTools - successful response with no image data', () => {
   });
 
   it('should retry once and return the image when the first response is empty', async () => {
-    const mockGenerate = jest.fn().mockResolvedValueOnce(empty).mockResolvedValueOnce(image);
+    const mockGenerate = jest
+      .fn()
+      .mockImplementationOnce(empty)
+      .mockImplementationOnce(imageResponse);
 
     const [content, artifact] = await createGenTool(mockGenerate).func({ prompt: 'test prompt' });
 
@@ -205,17 +190,22 @@ describe('OpenAIImageTools - successful response with no image data', () => {
   });
 
   it('should return a clear message instead of throwing when both responses are empty', async () => {
-    const mockGenerate = jest.fn().mockResolvedValue(empty);
+    const { logger } = require('@librechat/data-schemas');
+    const mockGenerate = jest.fn().mockImplementation(empty);
 
     const [content, artifact] = await createGenTool(mockGenerate).func({ prompt: 'test prompt' });
 
     expect(mockGenerate).toHaveBeenCalledTimes(2);
     expect(content).toContain('returned no image');
     expect(artifact).toEqual({});
+    expect(logger.warn).toHaveBeenLastCalledWith(
+      expect.stringContaining('no image data'),
+      expect.objectContaining({ request_id: 'call-123', prompt_length: 11 }),
+    );
   });
 
   it('should treat a response without a data array as empty', async () => {
-    const mockGenerate = jest.fn().mockResolvedValue({});
+    const mockGenerate = jest.fn().mockImplementation(() => apiResponse({}));
 
     const [content] = await createGenTool(mockGenerate).func({ prompt: 'test prompt' });
 
@@ -224,7 +214,7 @@ describe('OpenAIImageTools - successful response with no image data', () => {
   });
 
   it('should not retry when the first response has an image', async () => {
-    const mockGenerate = jest.fn().mockResolvedValue(image);
+    const mockGenerate = jest.fn().mockImplementation(imageResponse);
 
     await createGenTool(mockGenerate).func({ prompt: 'test prompt' });
 

@@ -34,6 +34,17 @@ function replaceUnwantedChars(inputString) {
 const noImageMessage =
   'The image provider returned no image for this prompt. The provider may have declined the prompt. Do not call the tool again with the same prompt; ask the user to rephrase it.';
 
+/**
+ * Request id of a response, from the provider or from a gateway in front of it
+ * (LiteLLM sends `x-litellm-call-id` and no `x-request-id`).
+ * @param {Headers | Record<string, string> | undefined} headers
+ * @returns {string | undefined}
+ */
+function getRequestId(headers) {
+  const get = (name) => (typeof headers?.get === 'function' ? headers.get(name) : headers?.[name]);
+  return get('x-request-id') ?? get('x-litellm-call-id') ?? undefined;
+}
+
 function returnValue(value) {
   if (typeof value === 'string') {
     return [value, {}];
@@ -153,6 +164,8 @@ function createOpenAIImageTools(fields = {}) {
       }
 
       let resp;
+      /** @type {string | undefined} */
+      let requestId;
       /** @type {AbortSignal} */
       let derivedSignal = null;
       /** @type {() => void} */
@@ -165,32 +178,37 @@ function createOpenAIImageTools(fields = {}) {
           derivedSignal.addEventListener('abort', abortHandler, { once: true });
         }
 
-        const generate = () =>
-          openai.images.generate(
-            {
-              model: imageModel,
-              prompt: replaceUnwantedChars(prompt),
-              n: Math.min(Math.max(1, n), 10),
-              background,
-              output_format,
-              output_compression:
-                output_format === EImageOutputType.WEBP || output_format === EImageOutputType.JPEG
-                  ? output_compression
-                  : undefined,
-              quality,
-              size,
-            },
-            {
-              signal: derivedSignal,
-            },
-          );
+        const generate = async () => {
+          const { data, response } = await openai.images
+            .generate(
+              {
+                model: imageModel,
+                prompt: replaceUnwantedChars(prompt),
+                n: Math.min(Math.max(1, n), 10),
+                background,
+                output_format,
+                output_compression:
+                  output_format === EImageOutputType.WEBP || output_format === EImageOutputType.JPEG
+                    ? output_compression
+                    : undefined,
+                quality,
+                size,
+              },
+              {
+                signal: derivedSignal,
+              },
+            )
+            .withResponse();
+          requestId = getRequestId(response?.headers);
+          return data;
+        };
 
         resp = await generate();
         /** Some OpenAI-compatible providers answer a declined prompt with HTTP 200 and an empty
          * `data` array. The same prompt often passes on a second attempt. */
         if (resp && !resp.data?.length) {
           logger.warn('[image_gen_oai] Response has no image data, retrying once', {
-            request_id: resp._request_id,
+            request_id: requestId,
             prompt_length: prompt.length,
           });
           resp = await generate();
@@ -216,7 +234,7 @@ Error Message: ${error.message}`);
       // TODO: handle cost in `resp.usage`
       if (!resp.data?.length) {
         logger.warn('[image_gen_oai] Response has no image data after one retry', {
-          request_id: resp._request_id,
+          request_id: requestId,
           prompt_length: prompt.length,
         });
         return returnValue(noImageMessage);
@@ -389,7 +407,7 @@ Error Message: ${error.message}`);
 
         if (!response.data || !response.data.data || !response.data.data.length) {
           logger.warn('[image_edit_oai] Response has no image data', {
-            request_id: response.headers?.['x-request-id'],
+            request_id: getRequestId(response.headers),
             prompt_length: prompt.length,
           });
           return returnValue(noImageMessage);
